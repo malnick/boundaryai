@@ -25,21 +25,6 @@ var (
 	maxRetries      int
 )
 
-type api struct {
-	Paths map[string]struct {
-		Path map[string]struct {
-			Get map[string]struct {
-				Summary    string `json:"summary"`
-				Parameters []struct {
-					Name        string `json:"name"`
-					Description string `json:"description"`
-					Required    string `json:"required"`
-				} `json:"parameters"`
-			} `json:"get"`
-		}
-	} `json:"paths"`
-}
-
 func main() {
 	app := &cli.App{
 		Name:  "boundary-ai",
@@ -110,6 +95,19 @@ func run() error {
 	return nil
 }
 
+type api struct {
+	Paths map[string]struct {
+		Get map[string]struct {
+			Summary    string `json:"summary"`
+			Parameters []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Required    string `json:"required"`
+			} `json:"parameters"`
+		} `json:"get"`
+	} `json:"paths"`
+}
+
 func getBoundaryApiPaths() ([]string, error) {
 	url := "https://raw.githubusercontent.com/hashicorp/boundary/main/internal/gen/controller.swagger.json"
 	paths := []string{}
@@ -125,15 +123,15 @@ func getBoundaryApiPaths() ([]string, error) {
 		return paths, err
 	}
 
-	jm := make(map[string]interface{})
-	err = json.Unmarshal(body, &jm)
+	a := &api{}
+	err = json.Unmarshal(body, a)
 	if err != nil {
 		return paths, err
 	}
 
-	for k, v := range jm["paths"].(map[string]interface{}) {
+	for k, v := range a.Paths {
 		fmt.Printf("Key: %s\nValue: %s\n\n", k, v)
-		paths = append(paths, k)
+		//paths = append(paths, k)
 	}
 
 	return paths, nil
