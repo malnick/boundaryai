@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -13,7 +16,6 @@ import (
 	"github.com/tmc/langchaingo/chains"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
-	"github.com/tmc/langchaingo/tools/sqldatabase"
 	_ "github.com/tmc/langchaingo/tools/sqldatabase/postgresql"
 )
 
@@ -22,6 +24,21 @@ var (
 	psqlDsn         string
 	maxRetries      int
 )
+
+type api struct {
+	Paths map[string]struct {
+		Path map[string]struct {
+			Get map[string]struct {
+				Summary    string `json:"summary"`
+				Parameters []struct {
+					Name        string `json:"name"`
+					Description string `json:"description"`
+					Required    string `json:"required"`
+				} `json:"parameters"`
+			} `json:"get"`
+		}
+	} `json:"paths"`
+}
 
 func main() {
 	app := &cli.App{
@@ -63,80 +80,78 @@ func run() error {
 		return err
 	}
 
-	db, err := sqldatabase.NewSQLDatabaseWithDSN("pgx", psqlDsn, nil)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	sqlDatabaseChain := chains.NewSQLDatabaseChain(llm, 10, db)
-	ctx := context.Background()
-
 	fmt.Println("Conversation")
 	fmt.Println("---------------------")
 	fmt.Print("> ")
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
 
-		tables, err := getRelevantTables(s.Text(), llm)
+		query := s.Text()
+
+		paths, err := getRelevantPaths(query, llm)
 		if err != nil {
 			return err
 		}
 
-		input := map[string]any{
-			"query":              s.Text(),
-			"table_names_to_use": tables,
-		}
+		tpl := fmt.Sprintf(`
+		Given the following query and set of HTTP API paths, write syntatically correct HTTP request URLs to get the 
+		relevant information using the base URL provided in the query. If no base URL is given, default to http://localhost:9200. 
+		Query: %s
+		Paths: %s`, query, paths)
 
-		out, err := chains.Predict(ctx, sqlDatabaseChain, input)
-		if err != nil {
-			out, err = retryPredict(ctx, sqlDatabaseChain, input, llm, 0, err)
-		}
-		fmt.Println(out)
+		completion, err := llm.Call(context.Background(), tpl,
+			llms.WithTemperature(0),
+		)
+
+		fmt.Println(completion)
 
 		fmt.Print("> ")
 	}
 	return nil
 }
 
-func getRelevantTables(query string, llm llms.LLM) ([]string, error) {
-	tables := []string{
-		"auth_method",
-		"auth_account",
-		"auth_oidc_account",
-		"auth_oidc_method",
-		"auth_password_account",
-		"auth_password_method",
-		"auth_token",
-		"host",
-		"host_catalog",
-		"host_dns_name",
-		"host_ip_address",
-		"host_set",
-		"iam_group",
-		"iam_group_member_user",
-		"iam_group_role",
-		"iam_role",
-		"iam_role_grant",
-		"iam_scope",
-		"iam_scope_global",
-		"iam_scope_org",
-		"iam_scope_project",
-		"iam_user",
-		"iam_user_role",
-		"session",
-		"session_state",
-		"session_connection",
-		"session_target_address",
-		"session_valid_state",
-		"target",
+func getBoundaryApiPaths() ([]string, error) {
+	url := "https://raw.githubusercontent.com/hashicorp/boundary/main/internal/gen/controller.swagger.json"
+	paths := []string{}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return paths, err
+	}
+
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return paths, err
+	}
+
+	jm := make(map[string]interface{})
+	err = json.Unmarshal(body, &jm)
+	if err != nil {
+		return paths, err
+	}
+
+	for k, v := range jm["paths"].(map[string]interface{}) {
+		fmt.Printf("Key: %s\nValue: %s\n\n", k, v)
+		paths = append(paths, k)
+	}
+
+	return paths, nil
+}
+
+func getRelevantPaths(query string, llm llms.LLM) ([]string, error) {
+	paths, err := getBoundaryApiPaths()
+	if err != nil {
+		return []string{}, err
 	}
 
 	tpl := fmt.Sprintf(`
-Of the following list of tables and the given query, which tables are most relevant?
+Of the following HTTP API paths and the given query, return an ordered list of HTTP API requests that 
+return relevant information about the query. 
+
 Format the response to be a comma separated list.
 Query: %s
-Tables %+v`, query, tables)
+API Paths %+v`, query, paths)
 
 	ctx := context.Background()
 	completion, err := llm.Call(ctx, tpl,
@@ -146,15 +161,15 @@ Tables %+v`, query, tables)
 		return []string{}, err
 	}
 
-	rawTables := strings.Split(completion, ",")
+	rawPaths := strings.Split(completion, ",")
 
-	trimmedTables := []string{}
-	for _, t := range rawTables {
-		trimmedTables = append(trimmedTables, strings.TrimSpace(t))
+	trimmedPaths := []string{}
+	for _, p := range rawPaths {
+		trimmedPaths = append(trimmedPaths, strings.TrimSpace(p))
 	}
-	tables = trimmedTables
+	paths = trimmedPaths
 
-	return tables, nil
+	return paths, nil
 }
 
 func retryPredict(ctx context.Context, c chains.Chain, input map[string]any, llm llms.LanguageModel, retries int, err error) (string, error) {
