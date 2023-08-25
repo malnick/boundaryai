@@ -12,15 +12,15 @@ import (
 
 	"github.com/tmc/langchaingo/chains"
 	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/openai"
+	"github.com/tmc/langchaingo/llms/huggingface"
 	"github.com/tmc/langchaingo/tools/sqldatabase"
 	_ "github.com/tmc/langchaingo/tools/sqldatabase/postgresql"
 )
 
 var (
-	openAiAuthToken string
-	psqlDsn         string
-	maxRetries      int
+	hfApiToken string
+	psqlDsn    string
+	maxRetries int
 )
 
 func main() {
@@ -35,10 +35,10 @@ func main() {
 				Destination: &psqlDsn,
 			},
 			&cli.StringFlag{
-				Name:        "openai-api-key",
-				Usage:       "OpenAI API key",
-				EnvVars:     []string{"OPENAI_API_KEY"},
-				Destination: &openAiAuthToken,
+				Name:        "hf-api-token",
+				Usage:       "HuggingFace API key",
+				EnvVars:     []string{"HUGGINGFACE_API_TOKEN"},
+				Destination: &hfApiToken,
 			},
 			&cli.IntFlag{
 				Name:        "max-retries",
@@ -58,10 +58,11 @@ func main() {
 }
 
 func run() error {
-	llm, err := openai.New()
+	llm, err := huggingface.New()
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
+	ctx := context.Background()
 
 	db, err := sqldatabase.NewSQLDatabaseWithDSN("pgx", psqlDsn, nil)
 	if err != nil {
@@ -70,7 +71,6 @@ func run() error {
 	defer db.Close()
 
 	sqlDatabaseChain := chains.NewSQLDatabaseChain(llm, 10, db)
-	ctx := context.Background()
 
 	fmt.Println("Conversation")
 	fmt.Println("---------------------")
@@ -88,7 +88,7 @@ func run() error {
 			"table_names_to_use": tables,
 		}
 
-		out, err := chains.Predict(ctx, sqlDatabaseChain, input)
+		out, err := chains.Predict(ctx, sqlDatabaseChain, input, chains.WithModel("bert-base-uncased"))
 		if err != nil {
 			out, err = retryPredict(ctx, sqlDatabaseChain, input, llm, 0, err)
 		}
@@ -164,7 +164,7 @@ Query: %s
 Error: %s`, input["query"], err)
 
 	input["query"] = tpl
-	resp, err := chains.Predict(ctx, c, input)
+	resp, err := chains.Predict(ctx, c, input, chains.WithModel("bert-base-uncased"))
 
 	if err != nil {
 		if retries == maxRetries {
